@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("MacOSX")
 import matplotlib.pyplot as plt
+import matplotlib.lines as mlines
 from scipy.interpolate import CubicSpline
 from dotenv import load_dotenv
 
@@ -16,8 +17,14 @@ API_KEY = os.getenv('GRAPHHOPPER_API_KEY')
 if not API_KEY:
     raise ValueError('GRAPHHOPPER_API_KEY not found in the .env file')
 
-# Get coordinates from GraphHopper of a list of locations
+
 def get_coordinates(locations):
+    """
+    Get coordinates from GraphHopper of a list of locations.
+
+    Parameters:
+        - locations: list of locations
+    """
     url = 'https://graphhopper.com/api/1/geocode'
     locations_coord = []
 
@@ -41,8 +48,14 @@ def get_coordinates(locations):
     return locations_coord
 
 
-# Get route from GraphHopper with points on geo-coordinates
 def get_route(locations, vehicle_type):
+    """
+    Get route from GraphHopper with points on geo-coordinates.
+
+    Parameters:
+        - locations: list of locations
+        - vehicle_type: type of vehicle
+    """
     url = 'https://graphhopper.com/api/1/route'
 
     locations_coord = get_coordinates(locations)
@@ -78,8 +91,13 @@ def get_route(locations, vehicle_type):
     }
 
 
-# Map projection (first point as origin)
 def global2local(points):
+    """
+    Map projection : geo-coordinates to local coordinates (first point as origin).
+
+    Parameters:
+        - points: list of points in geo-coordinates.
+    """
     lon0, lat0 = points[0]  # Origin
     h0 = 0  # Ignore altitude
 
@@ -92,22 +110,26 @@ def global2local(points):
     return local_points
 
 
-# Compute the midpoint between two points
 def get_midpoint(point1, point2):
-  x1, y1 = point1
-  x2, y2 = point2
+    """
+    Compute the midpoint between two points.
+    """
+    x1, y1 = point1
+    x2, y2 = point2
 
-  midpoint_x = (x1 + x2) / 2
-  midpoint_y = (y1 + y2) / 2
+    midpoint_x = (x1 + x2) / 2
+    midpoint_y = (y1 + y2) / 2
 
-  return midpoint_x, midpoint_y
+    return midpoint_x, midpoint_y
 
 
-# Use interpolation to insert additional points between original way-points
 def add_extra_points(point1, point2):
+    """
+    Use interpolation to insert additional points between original way-points.
+    """
     distance = math.dist(point1, point2)
     extra_points = []
-    threshold = 5
+    threshold = 5  # Maximum allowed distance between two points (meters)
 
     if threshold < distance:
         midpoint = get_midpoint(point1, point2)
@@ -125,45 +147,78 @@ def add_extra_points(point1, point2):
 
 
 def crate_spline(points):
-    # Parametric variable t
+    """
+    Build a cubic spline from a sequence of way-points.
+
+    Parameters:
+        - points: list of way-points in local coordinates.
+    """
+    # Parametric variable
     t = np.arange(len(points))
     xs = [point[0] for point in points]
     ys = [point[1] for point in points]
 
-    # Build parametric spline
+    # Build spline
     spline_x = CubicSpline(t, xs)
     spline_y = CubicSpline(t, ys)
 
     return spline_x, spline_y
 
 
-# Compute reference path
 def get_reference_path(route):
+    """
+    Compute reference path.
 
+    Parameters:
+        - route : route from GraphHopper.
+
+    Returns:
+        - local_points : list of original points in local coordinates.
+        - detailed_path : list of all way-points (original + extra added) in local coordinates.
+        - spline : cubic spline representation of the path.
+    """
     points = [(lon, lat) for lon, lat in route['points']]
 
-    # Map projection
+    # Map projection to local coordinates
     local_points = global2local(points)
 
-    # Add missing points
+    # Add extra points
     detailed_path = []
     for i in range(len(local_points) - 1):
         point1 = local_points[i]
         point2 = local_points[i + 1]
 
-        detailed_path.append(point1)
+        # Get extra points
         extra_points = add_extra_points(point1, point2)
+
+        # Add to new (detailed) points list ensuring right order
+        detailed_path.append(point1)
         detailed_path += extra_points
 
-    detailed_path.append(local_points[-1])
+    detailed_path.append(local_points[-1])   # Add last/final point
 
+    # Build spline
     spline = crate_spline(detailed_path)
 
     return local_points, detailed_path, spline
 
 
 def get_speed_limits(route):
+    """
+    Get list of speed limits intervals along the reference path for detailed way-points (original + extra added).
+
+    Parameters:
+        - route : route from GraphHopper.
+          --> Array of [(original_start_idx, original_end_idx), speed limit value]
+
+    Returns:
+        - detailed_speed_limits : list of detailed speed limits
+          --> Array of [(original_start_idx, original_end_idx), (detailed_start_idx, detailed_end_pidx), speed limit value]
+    """
+    # Way-points
     original_points, detailed_path, _ = get_reference_path(route)
+
+    # Speed limits from GraphHopper
     speed_limits = route.get('max_speed', [])
 
     detailed_speed_limits = []
@@ -172,11 +227,13 @@ def get_speed_limits(route):
         interval_start, interval_end, value = limit
 
         if value is None:
-            value = 30.0
+            value = 30.0  # Default limit at 30 km/h for missing data
 
+        # Original speed limit path interval
         original_start_point = original_points[interval_start]
         original_end_point = original_points[interval_end]
 
+        # Detailed speed limit path interval
         detailed_interval_start = detailed_path.index(original_start_point)
         detailed_interval_end = detailed_path.index(original_end_point)
 
@@ -190,56 +247,90 @@ def get_speed_limits(route):
 
 
 
-def plot_path(route, points, spline, extra_points, show_extra_points=False):
-        # Route data
-        start_name = route['start'].split(',')[0]
-        end_name = route['end'].split(',')[0]
-        distance = route['distance']
-        time = route['time']
+def plot_path(route, original_points, spline, extra_points, show_extra_points=False, show_speed_limits=False):
+    """
+    Plot the reference path with original points and optional extra points + annotated speed limits along the spline.
+    """
+    # Route data
+    start_name = route['start'].split(',')[0]
+    end_name = route['end'].split(',')[0]
+    distance = route['distance']
+    time = route['time']
+    speed_limits = get_speed_limits(route)
 
-        # Reference path spline
-        spline_x, spline_y = spline
+    # Reference path spline
+    spline_x, spline_y = spline
 
-        # Parametric parameter
-        t_min = 0
-        t_max = len(spline_x.x) - 1
-        num_samples = len(extra_way_points) * 50
-        t_new = np.linspace(t_min, t_max, num_samples)
+    # Parametric parameter
+    t_min = 0
+    t_max = len(spline_x.x) - 1
+    num_samples = len(extra_way_points) * 50
+    t_new = np.linspace(t_min, t_max, num_samples)
 
-        xs_spline = spline_x(t_new)
-        ys_spline = spline_y(t_new)
+    # Spline coordinates
+    xs_spline = spline_x(t_new)
+    ys_spline = spline_y(t_new)
 
-        # Original points
-        start_x, start_y = points[0]
-        end_x, end_y = points[-1]
-        xs = [p[0] for p in points[1:-1]]
-        ys = [p[1] for p in points[1:-1]]
+    # Original points
+    start_x, start_y = original_points[0]
+    end_x, end_y = original_points[-1]
+    xs = [p[0] for p in original_points[1:-1]]
+    ys = [p[1] for p in original_points[1:-1]]
 
-        # Added points
-        xs_extra = None
-        ys_extra = None
-        if show_extra_points:
-            xs_extra = [p[0] for p in extra_points]
-            ys_extra = [p[1] for p in extra_points]
+    # Added extra points
+    xs_extra = None
+    ys_extra = None
+    if show_extra_points:
+        xs_extra = [p[0] for p in extra_points]
+        ys_extra = [p[1] for p in extra_points]
 
-        plt.figure(figsize=(10, 6))
-        plt.gca().set_axisbelow(True)
-        plt.plot(xs_spline, ys_spline, color='peru', linestyle='-', label='Spline path', zorder=1)        # Spline
-        if show_extra_points:
-            plt.scatter(xs_extra, ys_extra, s=8, color='green', label='Extra way-points added', zorder=2) # Extra points
-        plt.scatter(xs, ys, s=20, color='blue', label='Original way-points', zorder=3)                    # Original points
-        plt.scatter(start_x, start_y, s=100, color='green', label=f'{start_name} (start)', zorder=4)      # Start point
-        plt.scatter(end_x, end_y, s=100, color='red', label=f'{end_name} (end)', zorder=4)                # End point
-        plt.xlabel('X (m)')
-        plt.ylabel('Y (m)')
-        plt.title(f'Reference Path with Cubic Spline | Distance: {distance:.1f} m | Time: {time:.1f} s')
+
+    # --- Plot ---
+    plt.figure(figsize=(10, 6))
+    plt.gca().set_axisbelow(True)
+
+    # Plot spline
+    plt.plot(xs_spline, ys_spline, color='peru', linestyle='-', label='Spline path', zorder=1)
+
+    # Plot extra points
+    if show_extra_points:
+        plt.scatter(xs_extra, ys_extra, s=8, color='green', label='Extra way-points added', zorder=2)
+
+    # Plot original points
+    plt.scatter(xs, ys, s=20, color='blue', label='Original way-points', zorder=3)
+
+    if show_speed_limits:
+        # Annotate speed limits next to the original points
+        for idx, (x, y) in enumerate(original_points[1:-1]):
+            # Find speed limit interval
+            limit_value = None
+            for (interval_start, interval_end), (_, _), value in speed_limits:
+                if interval_start <= idx <= interval_end:
+                    limit_value = value*3.6  # m/s to km/h
+                    break
+
+            plt.text(x, y + 2, f"{limit_value:.0f} km/h", color='black', fontsize=8, ha='center', fontweight='bold')
+        speed_label = mlines.Line2D([], [], color='black', marker='$-$', linestyle='None', markersize=3, label='Speed limit')
+        plt.legend(handles=plt.gca().get_legend_handles_labels()[0] + [speed_label])
+
+    else:
         plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.show()
+
+    # Plot start/end points
+    plt.scatter(start_x, start_y, s=100, color='green', label=f'{start_name} (start)', zorder=4)
+    plt.scatter(end_x, end_y, s=100, color='red', label=f'{end_name} (end)', zorder=4)
+    plt.xlabel('X (m)')
+    plt.ylabel('Y (m)')
+    plt.title(f'Reference Path with Cubic Spline | Distance: {distance:.1f} m | Time: {time:.1f} s')
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
 
 
 def get_path_and_speed_limits(route):
+    """
+    Get the reference path (original and detailed points + spline) in one single function call.
+    """
     path = get_reference_path(route)
     speed_limits = get_speed_limits(route)
     return path, speed_limits
@@ -266,4 +357,4 @@ if __name__ == '__main__':
     print(f'Min Speed Limit: {np.min(speed_values) * 3.6:.1f} km/h')
 
     # Plot
-    plot_path(GraphHopper_route, way_points, reference_path, extra_way_points, show_extra_points=False)
+    plot_path(GraphHopper_route, way_points, reference_path, extra_way_points, show_extra_points=False, show_speed_limits=False)
