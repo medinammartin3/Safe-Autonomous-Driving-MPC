@@ -54,7 +54,7 @@ def get_route(locations):
         'point': [f'{start_coord[0]},{start_coord[1]}', f'{end_coord[0]},{end_coord[1]}'],
         'profile': 'car',
         'points_encoded': False,
-        # 'details': ['lanes'],
+        'details': ['lanes', 'max_speed'],
         'key': API_KEY
     }
 
@@ -67,11 +67,12 @@ def get_route(locations):
     path = data['paths'][0]
 
     return {
-        'distance_m': path['distance'],
+        'distance': path['distance'], # meters
         'time': path['time'] / 1000,  # ms to sec
         'points': path['points']['coordinates'],
-        # 'instructions': path['instructions'],
-        # 'lanes': path['details']['lanes']
+        'instructions': path['instructions'],
+        'lanes': path['details']['lanes'],
+        'max_speed': path['details']['max_speed']
     }
 
 
@@ -161,6 +162,32 @@ def get_reference_path(locations):
     return local_points, detailed_path, spline
 
 
+def get_speed_limits(locations, original_points, detailed_path):
+    route = get_route(locations)
+
+    speed_limits = route.get('max_speed', [])
+
+    detailed_speed_limits = []
+
+    for limit in speed_limits:
+        interval_start, interval_end, value = limit
+
+        if value is None:
+            value = 30.0
+
+        original_start_point = original_points[interval_start]
+        original_end_point = original_points[interval_end]
+
+        detailed_interval_start = detailed_path.index(original_start_point)
+        detailed_interval_end = detailed_path.index(original_end_point)
+
+        arr = [(interval_start, interval_end), (detailed_interval_start, detailed_interval_end), value]
+
+        detailed_speed_limits.append(arr)
+
+    return detailed_speed_limits
+
+
 
 def plot_path(points, spline, extra_points, show_extra_points=False):
         spline_x, spline_y = spline
@@ -208,6 +235,9 @@ if __name__ == '__main__':
 
     # Reference path
     way_points, extra_way_points, reference_path = get_reference_path(locations_list)
+    print("DISTANCE:", get_route(locations_list)["distance"])
+    print("POINTS: ", extra_way_points)
+    print("SPEED LIMITS: ", get_speed_limits(locations_list, way_points, extra_way_points))
 
     # Plot
     plot_path(way_points, reference_path, extra_way_points, show_extra_points=True)
