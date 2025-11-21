@@ -42,7 +42,7 @@ def get_coordinates(locations):
 
 
 # Get route from GraphHopper with points on geo-coordinates
-def get_route(locations):
+def get_route(locations, vehicle_type):
     url = 'https://graphhopper.com/api/1/route'
 
     locations_coord = get_coordinates(locations)
@@ -52,7 +52,7 @@ def get_route(locations):
 
     params = {
         'point': [f'{start_coord[0]},{start_coord[1]}', f'{end_coord[0]},{end_coord[1]}'],
-        'profile': 'car',
+        'profile': vehicle_type,
         'points_encoded': False,
         'details': ['lanes', 'max_speed'],
         'key': API_KEY
@@ -67,6 +67,8 @@ def get_route(locations):
     path = data['paths'][0]
 
     return {
+        'start': locations[0],
+        'end': locations[-1],
         'distance': path['distance'], # meters
         'time': path['time'] / 1000,  # ms to sec
         'points': path['points']['coordinates'],
@@ -136,9 +138,7 @@ def crate_spline(points):
 
 
 # Compute reference path
-def get_reference_path(locations):
-    # Raw GraphHopper route
-    route = get_route(locations)
+def get_reference_path(route):
 
     points = [(lon, lat) for lon, lat in route['points']]
 
@@ -162,9 +162,8 @@ def get_reference_path(locations):
     return local_points, detailed_path, spline
 
 
-def get_speed_limits(locations, original_points, detailed_path):
-    route = get_route(locations)
-
+def get_speed_limits(route):
+    original_points, detailed_path, _ = get_reference_path(route)
     speed_limits = route.get('max_speed', [])
 
     detailed_speed_limits = []
@@ -191,21 +190,30 @@ def get_speed_limits(locations, original_points, detailed_path):
 
 
 
-def plot_path(points, spline, extra_points, show_extra_points=False):
+def plot_path(route, points, spline, extra_points, show_extra_points=False):
+        # Route data
+        start_name = route['start'].split(',')[0]
+        end_name = route['end'].split(',')[0]
+        distance = route['distance']
+        time = route['time']
+
+        # Reference path spline
         spline_x, spline_y = spline
 
-        num_samples = len(extra_way_points) * 50
-
+        # Parametric parameter
         t_min = 0
         t_max = len(spline_x.x) - 1
+        num_samples = len(extra_way_points) * 50
         t_new = np.linspace(t_min, t_max, num_samples)
 
         xs_spline = spline_x(t_new)
         ys_spline = spline_y(t_new)
 
         # Original points
-        xs = [p[0] for p in points]
-        ys = [p[1] for p in points]
+        start_x, start_y = points[0]
+        end_x, end_y = points[-1]
+        xs = [p[0] for p in points[1:-1]]
+        ys = [p[1] for p in points[1:-1]]
 
         # Added points
         xs_extra = None
@@ -215,16 +223,26 @@ def plot_path(points, spline, extra_points, show_extra_points=False):
             ys_extra = [p[1] for p in extra_points]
 
         plt.figure(figsize=(10, 6))
+        plt.gca().set_axisbelow(True)
+        plt.plot(xs_spline, ys_spline, color='peru', linestyle='-', label='Spline path', zorder=1)        # Spline
         if show_extra_points:
-            plt.scatter(xs_extra, ys_extra, s=8, color='green', label='Extra way-points added')
-        plt.scatter(xs, ys, s=8, color='blue', label='Original way-points')
-        plt.plot(xs_spline, ys_spline, 'r-', label='Spline path')
-        plt.xlabel('X [m]')
-        plt.ylabel('Y [m]')
-        plt.title('Reference Path with Parametric Cubic Spline')
+            plt.scatter(xs_extra, ys_extra, s=8, color='green', label='Extra way-points added', zorder=2) # Extra points
+        plt.scatter(xs, ys, s=20, color='blue', label='Original way-points', zorder=3)                    # Original points
+        plt.scatter(start_x, start_y, s=100, color='green', label=f'{start_name} (start)', zorder=4)      # Start point
+        plt.scatter(end_x, end_y, s=100, color='red', label=f'{end_name} (end)', zorder=4)                # End point
+        plt.xlabel('X (m)')
+        plt.ylabel('Y (m)')
+        plt.title(f'Reference Path with Cubic Spline | Distance: {distance:.1f} m | Time: {time:.1f} s')
         plt.legend()
         plt.grid(True)
+        plt.tight_layout()
         plt.show()
+
+
+def get_path_and_speed_limits(route):
+    path = get_reference_path(route)
+    speed_limits = get_speed_limits(route)
+    return path, speed_limits
 
 
 if __name__ == '__main__':
@@ -234,12 +252,18 @@ if __name__ == '__main__':
     # start = 'McGill University'
     # end = 'Université de Montréal'
     locations_list = [start, end]
+    vehicle = 'car'  # ['car', 'truck']
 
     # Reference path
-    way_points, extra_way_points, reference_path = get_reference_path(locations_list)
-    print("DISTANCE:", get_route(locations_list)["distance"])
-    print("POINTS: ", extra_way_points)
-    print("SPEED LIMITS: ", get_speed_limits(locations_list, way_points, extra_way_points))
+    GraphHopper_route = get_route(locations_list, vehicle)
+    (way_points, extra_way_points, reference_path), speed_limits_list = get_path_and_speed_limits(GraphHopper_route)
+
+    print(f'Distance: {GraphHopper_route["distance"]} m')
+    print(f'Estimated Time: {GraphHopper_route["time"]} s')
+
+    speed_values = [limit[2] for limit in speed_limits_list]
+    print(f'Max Speed Limit: {np.max(speed_values) * 3.6:.1f} km/h')
+    print(f'Min Speed Limit: {np.min(speed_values) * 3.6:.1f} km/h')
 
     # Plot
-    plot_path(way_points, reference_path, extra_way_points, show_extra_points=True)
+    plot_path(GraphHopper_route, way_points, reference_path, extra_way_points, show_extra_points=False)
