@@ -181,6 +181,8 @@ def get_speed_limits(locations, original_points, detailed_path):
         detailed_interval_start = detailed_path.index(original_start_point)
         detailed_interval_end = detailed_path.index(original_end_point)
 
+        value = value / 3.6  # km/h to m/s
+
         arr = [(interval_start, interval_end), (detailed_interval_start, detailed_interval_end), value]
 
         detailed_speed_limits.append(arr)
