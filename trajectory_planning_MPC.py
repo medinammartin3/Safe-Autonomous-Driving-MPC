@@ -319,8 +319,6 @@ class TrajectoryOptimizer:
             constraints.append({"type": "ineq", "fun": k_max})
 
 
-
-
         # --- Controls constraints ---
         # (Curvature bounds)
         for k in range(N):
@@ -431,6 +429,13 @@ def unpack_reference_path(route):
 def optimize_full_trajectory(route, max_chunk_size=100):
     """
     Compute the full optimal reference trajectory with a chunked optimization scheme / receding horizon.
+
+    Parameters:
+        - route : route from GraphHopper.
+        - max_chunk_size : maximum chunk size in meters.
+
+    Returns:
+        - X, U, S : Optimal full trajectory.
     """
     # Reference path
     detailed_points, reference_path_spline, speed_limits, s_values, s_total = unpack_reference_path(route)
