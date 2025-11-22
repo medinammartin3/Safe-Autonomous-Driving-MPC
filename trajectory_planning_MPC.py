@@ -229,10 +229,7 @@ class TrajectoryOptimizer:
             def dynamics_constraints(z, k=k):
                 X, U, _ = self.unpack(z)
                 return X[k + 1] - self.integrate(X[k], U[k], k_ref_fun)
-            constraints.append({
-                "type": "eq",
-                "fun": dynamics_constraints
-            })
+            constraints.append({"type": "eq", "fun": dynamics_constraints})
 
 
         # --- Initial state constraint ---
@@ -499,14 +496,18 @@ def optimize_full_trajectory(route, max_chunk_size=100):
 
     while remaining_dist > 0.1:
 
-        chunk_size = min(max_chunk_size, remaining_dist) # meters
+        # Choose chunk size (meters)
+        if remaining_dist < max_chunk_size:
+            chunk_size = remaining_dist
+            is_final_chunk = True
+        else:
+            chunk_size = max_chunk_size
+            is_final_chunk = False
 
         current_s = current_x0[0]
         s_target = current_s + chunk_size
 
         print(f"==> Chunk #{chunk_nb} : {current_s} --> {s_target}")
-
-        is_final_chunk = (abs(s_target - s_total) < 1.0)
 
         avg_speed = np.mean(v_max_array[int(current_s/5):]) # Points every 5 m
         est_time = chunk_size / avg_speed
@@ -521,7 +522,7 @@ def optimize_full_trajectory(route, max_chunk_size=100):
 
         mpc = TrajectoryOptimizer(horizon=horizon, N=N, dt=dt)
 
-        X, U, S = mpc.optimize(current_x0, s_target, k_ref_fun, v_min_fun, v_max_fun, min_speed_limit)
+        X, U, S = mpc.optimize(current_x0, s_target, k_ref_fun, v_min_fun, v_max_fun, min_speed_limit, is_final_chunk)
 
         # Solution concatenation
         # --> len(X) = N+1
