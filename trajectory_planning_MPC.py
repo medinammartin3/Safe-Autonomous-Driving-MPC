@@ -803,12 +803,12 @@ def recreate_trajectory(X, route):
 
 if __name__ == '__main__':
     # Route locations
-    # start = 'Avenue Lincoln 1680, H3H 1G9 Montréal, Québec, Canada'
-    # end = 'Tim Hortons, Rue Guy 2081, H3H 2L9 Montréal, Québec, Canada'
+    start = 'Avenue Lincoln 1680, H3H 1G9 Montréal, Québec, Canada'
+    end = 'Tim Hortons, Rue Guy 2081, H3H 2L9 Montréal, Québec, Canada'
     # start = 'McGill University'
     # end = 'Université de Montréal'
-    start = 'Musée des Beaux-Arts de Montréal'
-    end = 'Concordia University (SGW Campus)'
+    # start = 'Musée des Beaux-Arts de Montréal'
+    # end = 'Concordia University (SGW Campus)'
     locations_list = [start, end]
     vehicle = 'car'  # ['car', 'truck']
 
