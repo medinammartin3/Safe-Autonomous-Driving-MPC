@@ -817,7 +817,7 @@ if __name__ == '__main__':
     X, U, S = optimize_full_trajectory(GraphHopper_route)
 
     # Plot solution
-    # plot_results(X, U, S)
+    plot_results(X, U, S)
 
     # Plot trajectory visualization
     recreate_trajectory(X, GraphHopper_route)
