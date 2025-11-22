@@ -4,7 +4,7 @@ import requests
 import pymap3d as pm
 import numpy as np
 import matplotlib
-matplotlib.use("MacOSX")
+matplotlib.use("MacOSX")  # Change accordingly to your OS
 import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
 from scipy.interpolate import CubicSpline
@@ -299,8 +299,12 @@ def plot_path(route, original_points, spline, extra_points, show_extra_points=Fa
     # Plot original points
     plt.scatter(xs, ys, s=20, color='blue', label='Original way-points', zorder=3)
 
+    # Plot start/end points
+    plt.scatter(start_x, start_y, s=100, color='green', label=f'{start_name} (start)', zorder=4)
+    plt.scatter(end_x, end_y, s=100, color='red', label=f'{end_name} (end)', zorder=4)
+
+    # Annotate speed limits next to the original points
     if show_speed_limits:
-        # Annotate speed limits next to the original points
         for idx, (x, y) in enumerate(original_points[1:-1]):
             # Find speed limit interval
             limit_value = None
@@ -316,12 +320,9 @@ def plot_path(route, original_points, spline, extra_points, show_extra_points=Fa
     else:
         plt.legend()
 
-    # Plot start/end points
-    plt.scatter(start_x, start_y, s=100, color='green', label=f'{start_name} (start)', zorder=4)
-    plt.scatter(end_x, end_y, s=100, color='red', label=f'{end_name} (end)', zorder=4)
     plt.xlabel('X (m)')
     plt.ylabel('Y (m)')
-    plt.title(f'Reference Path with Cubic Spline | Distance : {distance:.1f} m | Estimated Time : {time:.1f} s')
+    plt.title(f'Reference Path with Cubic Spline | Real Distance : {distance:.1f} m | Estimated Time : {time:.1f} s')
     plt.axis('equal')
     plt.grid(True)
     plt.tight_layout()
@@ -339,12 +340,12 @@ def get_path_and_speed_limits(route):
 
 if __name__ == '__main__':
     # Route locations
-    # start = 'Avenue Lincoln 1680, H3H 1G9 Montréal, Québec, Canada'
-    # end = 'Tim Hortons, Rue Guy 2081, H3H 2L9 Montréal, Québec, Canada'
+    start = 'Avenue Lincoln 1680, H3H 1G9 Montréal, Québec, Canada'
+    end = 'Tim Hortons, Rue Guy 2081, H3H 2L9 Montréal, Québec, Canada'
     # start = 'McGill University'
     # end = 'Université de Montréal'
-    start = 'Musée des Beaux-Arts de Montréal'
-    end = 'Concordia University (SGW Campus)'
+    # start = 'Musée des Beaux-Arts de Montréal'
+    # end = 'Concordia University (SGW Campus)'
     locations_list = [start, end]
     vehicle = 'car'  # ['car', 'truck']
 
@@ -352,7 +353,7 @@ if __name__ == '__main__':
     GraphHopper_route = get_route(locations_list, vehicle)
     (way_points, extra_way_points, reference_path), speed_limits_list = get_path_and_speed_limits(GraphHopper_route)
 
-    print(f'Distance: {GraphHopper_route["distance"]} m')
+    print(f'Real Distance: {GraphHopper_route["distance"]} m')
     print(f'Estimated Time: {GraphHopper_route["time"]} s')
 
     speed_values = [limit[2] for limit in speed_limits_list]
