@@ -600,12 +600,14 @@ def sanity_checks(mpc, X, U, S, s_total):
     # U1 (Curvature)
     u1_check = not(np.min(U[:, 0]) < u1_min - CONTROLS_TOL and np.max(U[:, 0]) > u1_max + CONTROLS_TOL)
     print(f'Curvature rate limits respected : {u1_check}')
-    passed = u1_check
+    if passed:
+        passed = u1_check
 
     # U2 (Acceleration)
     u2_check = not(np.min(U[:, 1]) < u2_min - CONTROLS_TOL and np.max(U[:, 1]) > u2_max + CONTROLS_TOL)
     print(f'Acceleration limits respected : {u2_check}')
-    passed = u2_check
+    if passed:
+        passed = u2_check
 
     # --- Lateral Deviation ---
     max_lat_dev = np.max(np.abs(X[:, 1]))
