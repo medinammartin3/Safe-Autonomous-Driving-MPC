@@ -1,2 +1,3 @@
 # Safe-Autonomous-Driving-MPC
-MPC for tracking an offline generated reference path while minimizing tracking error and respecting safety constraints, such as speed and distance to other objects.
+Real-time MPC for tracking a precomputed reference trajectory while minimizing tracking error and enforcing safety 
+constraints such as speed limits and collision-avoidance.
