@@ -4,7 +4,7 @@ from scipy.optimize import minimize
 from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 
-# TODO: Lagrangians, Sanity checks
+# TODO: Lagrangians (or implement collocation), Sanity checks
 
 class TrajectoryOptimizer:
     """
@@ -102,7 +102,7 @@ class TrajectoryOptimizer:
     def integrate(self, x, u, k_ref_fun):
         """
         RK4 Integration.
-        Compute the next state: x_k+1 = x_k + dt * f(x,u)
+        Compute the next state: x_{k+1} = x_k + dt * f(x,u)
         We evaluate k_ref at the specific s for each RK stage.
         """
         dt = self.dt       # Time step
@@ -425,7 +425,7 @@ def unpack_reference_path(route):
 
 def optimize_full_trajectory(route, max_chunk_size=100):
     """
-    Compute the full optimal reference trajectory with a chunked optimization scheme / receding horizon.
+    Compute the full optimal reference trajectory with a chunked (segmented) optimization scheme.
 
     Parameters:
         - route : route from GraphHopper.
@@ -444,7 +444,7 @@ def optimize_full_trajectory(route, max_chunk_size=100):
     t_values = np.linspace(0.0, t_max, len(detailed_points))
     s_to_t = interp1d(s_values, t_values, kind='linear', fill_value='extrapolate')
 
-    # Curvature
+    # Reference curvature (curvature of the reference path spline)
     def k_ref_fun(s):
         t = float(s_to_t(s))
         x_spline, y_spline = reference_path_spline
@@ -520,9 +520,12 @@ def optimize_full_trajectory(route, max_chunk_size=100):
         dt = 0.5  # seconds
         N = int(np.ceil(horizon / dt))  # seconds
 
-        mpc = TrajectoryOptimizer(horizon=horizon, N=N, dt=dt)
+        optimizer = TrajectoryOptimizer(horizon=horizon, N=N, dt=dt)
 
-        X, U, S = mpc.optimize(current_x0, s_target, k_ref_fun, v_min_fun, v_max_fun, min_speed_limit, is_final_chunk)
+        X, U, S = optimizer.optimize(
+            current_x0, s_target, k_ref_fun, v_min_fun,
+            v_max_fun, min_speed_limit, is_final_chunk
+        )
 
         # Solution concatenation
         # --> len(X) = N+1
@@ -554,7 +557,7 @@ def optimize_full_trajectory(route, max_chunk_size=100):
     return X_final, U_final, S_final
 
 
-def sanity_checks(mpc, X, U, S, s_total):
+def sanity_checks(optimizer, X, U, S, s_total):
     """
     Verifies the physical feasibility of the optimized trajectory.
     """
@@ -595,8 +598,8 @@ def sanity_checks(mpc, X, U, S, s_total):
         print(f'Always non-negative velocity : True')
 
     # --- Control Bounds ---
-    u1_min, u2_min = mpc.u_min
-    u1_max, u2_max = mpc.u_max
+    u1_min, u2_min = optimizer.u_min
+    u1_max, u2_max = optimizer.u_max
 
     # U1 (Curvature)
     u1_check = not(np.min(U[:, 0]) < u1_min - CONTROLS_TOL and np.max(U[:, 0]) > u1_max + CONTROLS_TOL)
@@ -737,7 +740,7 @@ def recreate_trajectory(X, route):
 
     x_spl, y_spl = reference_path_spline
 
-    # Transform MPC solution (s, d) -> (x, y)
+    # Transform solution (s, d) -> (x, y)
     traj_x = []
     traj_y = []
 
@@ -747,7 +750,7 @@ def recreate_trajectory(X, route):
 
     lane_width = 3.5  # meters
 
-    # --- Re-create the reference path (spline) and MPC trajectory (optimal solution) ---
+    # --- Re-create the reference path (spline) and optimal trajectory (solution) ---
     for i in range(len(X)):
         s_vehicle = X[i, 0]
         d_vehicle = X[i, 1]
@@ -762,7 +765,7 @@ def recreate_trajectory(X, route):
         dy = float(y_spl(t, 1))
         angle = np.arctan2(dy, dx)
 
-        # Calculate vehicle's (MPC trajectory) position
+        # Calculate vehicle's (optimal trajectory) position
         # d > 0 = Left, d < 0 = Right
         x_actual = x_ref - d_vehicle * np.sin(angle)
         y_actual = y_ref + d_vehicle * np.cos(angle)
@@ -787,9 +790,9 @@ def recreate_trajectory(X, route):
     plt.plot(left_bound_x, left_bound_y, 'k-', linewidth=0.5, alpha=0.3)
     plt.plot(right_bound_x, right_bound_y, 'k-', linewidth=0.5, alpha=0.3, label='Road Boundaries')
 
-    # Plot MPC Trajectory
+    # Plot optimal trajectory
     velocities = X[:, 4] * 3.6  # m/s to km/h
-    trajectory = plt.scatter(traj_x, traj_y, c=velocities, cmap='plasma', s=30, label='Optimized Trajectory (MPC)')
+    trajectory = plt.scatter(traj_x, traj_y, c=velocities, cmap='plasma', s=30, label='Optimal Trajectory')
 
     plt.colorbar(trajectory, label='Velocity (km/h)')
     plt.legend()
