@@ -4,7 +4,7 @@ from scipy.optimize import minimize
 from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 
-# TODO: Lagrangians (or implement collocation), Sanity checks
+# TODO: Lagrangians, Sanity checks, fine-tune dt and max_chunk_size
 
 class TrajectoryOptimizer:
     """
@@ -99,38 +99,6 @@ class TrajectoryOptimizer:
         return x_dot
 
 
-    def integrate(self, x, u, k_ref_fun):
-        """
-        RK4 Integration.
-        Compute the next state: x_{k+1} = x_k + dt * f(x,u)
-        We evaluate k_ref at the specific s for each RK stage.
-        """
-        dt = self.dt       # Time step
-        f = self.dynamics  # Dynamics
-
-        # Left endpoint
-        k_ref_1 = k_ref_fun(x[0])
-        k1 = f(x, u, k_ref_1)
-
-        # Midpoint 1
-        x2 = x + 0.5 * dt * k1
-        k_ref_2 = k_ref_fun(x2[0])
-        k2 = f(x2, u, k_ref_2)
-
-        # Midpoint 2
-        x3 = x + 0.5 * dt * k2
-        k_ref_3 = k_ref_fun(x3[0])
-        k3 = f(x3, u, k_ref_3)
-
-        # Right endpoint
-        x4 = x + dt * k3
-        k_ref_4 = k_ref_fun(x4[0])
-        k4 = f(x4, u, k_ref_4)
-
-        x_next = x + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-        return x_next
-
-
     def unpack(self, z):
         """
         Convert the flat vector z into structured matrices.
@@ -170,7 +138,7 @@ class TrajectoryOptimizer:
         return z
 
 
-    def cost(self, z, x0, s_final):
+    def cost(self, z, x0, s_total):
         """"
         Compute total cost.
 
@@ -200,10 +168,10 @@ class TrajectoryOptimizer:
             y_k = np.array([d_k, o_k])
             term1 = self.w_y * y_k @ y_k
 
-            # 2. Progress cost (Minimize distance to target)
+            # 2. Progress cost (Minimize distance to global destination/target)
             s0 = x0[0]
-            denom = max(1, s_final - s0)  # No normalization if path length < 1 meter
-            term2 = self.w_s * ((s_final - s_k) / denom) ** 2
+            denom = max(1, s_total - s0)  # No normalization if path length < 1 meter
+            term2 = self.w_s * ((s_total - s_k) / denom) ** 2
 
             # 3. Control effort (Reduce energy consumption and maximize passenger comfort)
             term3 = self.w_u * np.dot(u_k, u_k)
@@ -215,7 +183,7 @@ class TrajectoryOptimizer:
         return cost
 
 
-    def constraints(self, x0, s_final, k_ref_fun, v_min_fun, v_max_fun, is_final_chunk=False):
+    def constraints(self, x0, s_target, k_ref_fun, v_min_fun, v_max_fun, is_final_chunk=False):
         """
         System constraints.
         """
@@ -223,12 +191,33 @@ class TrajectoryOptimizer:
         constraints = []
 
         # --- Dynamics constraints ---
-        # X[k+1] = RK4(X[k], U[k])
+        # Hermite-Simpson collocation
         # (Enforce continuity between Multiple Shooting windows)
         for k in range(N):
             def dynamics_constraints(z, k=k):
                 X, U, _ = self.unpack(z)
-                return X[k + 1] - self.integrate(X[k], U[k], k_ref_fun)
+                x_k = X[k]
+                x_next = X[k + 1]
+                u_k = U[k]
+                dt = self.dt
+
+                # Dynamics at the endpoints (k and k+1)
+                k_ref_k = k_ref_fun(x_k[0])
+                f_k = self.dynamics(x_k, u_k, k_ref_k)
+
+                k_ref_next = k_ref_fun(x_next[0])
+                f_next = self.dynamics(x_next, u_k, k_ref_next)
+
+                # Estimate the state at the midpoint (k + 1/2)
+                x_mid = 0.5 * (x_k + x_next) + (dt / 8.0) * (f_k - f_next)
+
+                # Dynamics at the midpoint
+                k_ref_mid = k_ref_fun(x_mid[0])
+                f_mid = self.dynamics(x_mid, u_k, k_ref_mid)
+
+                # Simpson's Rule
+                defect = x_next - x_k - (dt / 6.0) * (f_k + 4 * f_mid + f_next)
+                return defect
             constraints.append({"type": "eq", "fun": dynamics_constraints})
 
 
@@ -240,14 +229,23 @@ class TrajectoryOptimizer:
 
 
         # --- Terminal constraints ----
-        # (s = s_final)
-        def terminal_s(z):
-            X, _, _ = self.unpack(z)
-            s_N = X[N, 0]
-            return s_N - s_final
-        constraints.append({'type': 'eq', 'fun': terminal_s})
+        # s_N = s_target for final chunk (reach final destination)
+        if is_final_chunk:
+            def terminal_s(z):
+                X, _, _ = self.unpack(z)
+                s_N = X[N, 0]
+                return s_N - s_target
+            constraints.append({'type': 'eq', 'fun': terminal_s})
+        # s_N >= s_target for intermediate chunks
+        # (arrive at least to the chunk target and go further if you have time)
+        else:
+            def terminal_s(z):
+                X, _, _ = self.unpack(z)
+                s_N = X[N, 0]
+                return s_N - s_target
+            constraints.append({'type': 'ineq', 'fun': terminal_s})
 
-        # v = 0 only at the final horizon
+        # v = 0 only at the final chunk
         if is_final_chunk:
             def terminal_v(z):
                 X, _, _ = self.unpack(z)
@@ -258,7 +256,7 @@ class TrajectoryOptimizer:
 
         # ---- Safety constraints ----
         for k in range(N + 1):
-            # (Velocity bounds : v_min <= v + slack_v <= v_max)
+            # Velocity bounds : v_min <= v + slack_v <= v_max
             def speed_min(z, k=k):
                 X, _, S = self.unpack(z)
                 if k < N:
@@ -281,14 +279,13 @@ class TrajectoryOptimizer:
                 return v_max_fun(s_k) - (v_k + slack)
             constraints.append({"type": "ineq", "fun": speed_max})
 
-            # (Lateral acceleration : avoid excessive lateral forces)
+            # Lateral acceleration : avoid excessive lateral forces
             # -a_max <= k * v ^ 2 <= a_max
             def lateral_max(z, k=k):
                 X, _, _ = self.unpack(z)
                 k_k = X[k, 3]
                 v_k = X[k, 4]
                 return self.a_max - (k_k * v_k ** 2)
-
             constraints.append({"type": "ineq", "fun": lateral_max})
 
             def lateral_min(z, k=k):
@@ -296,12 +293,11 @@ class TrajectoryOptimizer:
                 k_k = X[k, 3]
                 v_k = X[k, 4]
                 return self.a_max + (k_k * v_k ** 2)
-
             constraints.append({"type": "ineq", "fun": lateral_min})
 
 
         # --- Physical constraints ---
-        # (Curvature limits)
+        # Curvature limits
         for k in range(N + 1):
             def k_min(z, k=k):
                 X, _, _ = self.unpack(z)
@@ -317,7 +313,7 @@ class TrajectoryOptimizer:
 
 
         # --- Controls constraints ---
-        # (Curvature bounds)
+        # Curvature bounds
         for k in range(N):
             def u1_min(z, k=k):
                 _, U, _ = self.unpack(z)
@@ -331,7 +327,7 @@ class TrajectoryOptimizer:
                 return self.u_max[0] - u1_k
             constraints.append({"type": "ineq", "fun": u1_max})
 
-            # (Acceleration/deceleration bounds)
+            # Acceleration/deceleration bounds
             def u2_min(z, k=k):
                 _, U, _ = self.unpack(z)
                 u2_k = U[k, 1]
@@ -344,7 +340,7 @@ class TrajectoryOptimizer:
                 return self.u_max[1] - u2_k
             constraints.append({"type": "ineq", "fun": u2_max})
 
-            # (Slack non-negative)
+            # Slack non-negative
             def non_negative_slack(z, k=k):
                 _, _, S = self.unpack(z)
                 return S[k]
@@ -353,20 +349,18 @@ class TrajectoryOptimizer:
         return constraints
 
 
-
-
-    def optimize(self, x0, s_final, k_ref_fun, v_min_fun, v_max_fun, min_speed_limit, is_final_chunk=False):
+    def optimize(self, x0, s_target, s_total, k_ref_fun, v_min_fun, v_max_fun, min_speed_limit, is_final_chunk=False):
         """
-        Solve the NLP
+        Solve the NLP.
         """
         N = self.N
 
         # --- Initial guess (Warm start) ---
-        # Linearly interpolate s from 0 to s_final and assume a constant moderate velocity.
+        # Linearly interpolate s from 0 to s_target and assume a constant moderate velocity.
 
-        # State
+        # States
         X_init = np.zeros((N + 1, 5))
-        X_init[:, 0] = np.linspace(x0[0], s_final, N + 1)  # Linearly increase s
+        X_init[:, 0] = np.linspace(x0[0], s_target, N + 1)  # Linearly increase s
         if is_final_chunk:
             # Slow down velocity until 0 on final horizon
             X_init[:, 4] = np.linspace(max(x0[4], min_speed_limit), 0.0, N + 1)
@@ -382,15 +376,15 @@ class TrajectoryOptimizer:
 
         z0 = self.pack(X_init, U_init, S_init)
 
-        constraints = self.constraints(x0, s_final, k_ref_fun, v_min_fun, v_max_fun, is_final_chunk)
+        constraints = self.constraints(x0, s_target, k_ref_fun, v_min_fun, v_max_fun, is_final_chunk)
 
-        # minimize
+        # Solve with SLSQP
         solution = minimize(
-            fun=lambda z: self.cost(z, x0, s_final),
+            fun=lambda z: self.cost(z, x0, s_total),
             x0=z0,
-            method='SLSQP',  # Try trust-constr
+            method='SLSQP',
             constraints=constraints,
-            options={'maxiter': 200, 'ftol': 1e-4, 'disp': True}
+            options={'maxiter': 300, 'ftol': 1e-4, 'disp': True}
         )
 
         X_sol, U_sol, S_sol = self.unpack(solution.x)
@@ -423,16 +417,20 @@ def unpack_reference_path(route):
     return  [points, spline, speed_limits, s_values, s_total]
 
 
-def optimize_full_trajectory(route, max_chunk_size=100):
+def optimize_full_trajectory(route, max_chunk_size=20):
     """
-    Compute the full optimal reference trajectory with a chunked (segmented) optimization scheme.
+    Compute the full optimal reference trajectory with a chunked (segmented) optimization scheme
+    and applying receding horizon principle for ensuring feasibility and computational efficiency.
+    Each chunk serves the role of a 'context window' for telling to the optimizer what's coming next
+    (turns, new speed limits, destination approaching, etc.), so he can prepare and ensure smooth transitions.
+    No feedback is applied, the optimal trajectory is deterministic.
 
     Parameters:
         - route : route from GraphHopper.
         - max_chunk_size : maximum chunk size in meters.
 
     Returns:
-        - X, U, S : Optimal full trajectory.
+        - X, U, S : full optimal trajectory.
     """
     # Reference path
     detailed_points, reference_path_spline, speed_limits, s_values, s_total = unpack_reference_path(route)
@@ -490,58 +488,70 @@ def optimize_full_trajectory(route, max_chunk_size=100):
     # Initial state for chunk 1
     current_x0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0])
 
-    print(f"Total Distance: {s_total} m")
+    print(f"Total Distance : {s_total:.2f} m")
     remaining_dist = s_total
     chunk_nb = 1
 
     while remaining_dist > 0.1:
 
-        # Choose chunk size (meters)
-        if remaining_dist < max_chunk_size:
+        # Choose context chunk size (meters)
+        if remaining_dist < max_chunk_size * 2:
             chunk_size = remaining_dist
             is_final_chunk = True
         else:
             chunk_size = max_chunk_size
             is_final_chunk = False
 
+        # Chunk target distance
         current_s = current_x0[0]
         s_target = current_s + chunk_size
 
-        print(f"==> Chunk #{chunk_nb} : {current_s} --> {s_target}")
+        print(f"==> Distance traveled --> {current_s:.2f} m ({current_s/s_total*100:.2f}%)")
 
-        avg_speed = np.mean(v_max_array[int(current_s/5):]) # Points every 5 m
+        avg_speed = np.mean(v_max_array[int(current_s / 5):])  # Points every 5 m
         est_time = chunk_size / avg_speed
 
-        # Safety buffer : give enough time to make full path (avoid Infeasibility)
-        # 20% if intermediate, 50% if final (vehicle needs to slow down to stop)
-        safety_buffer = 1.5 if is_final_chunk else 1.2
+        # Safety buffer : give enough time to make full path (avoid infeasibility)
+        safety_buffer = 2.0
 
         horizon = est_time * safety_buffer  # seconds
-        dt = 0.5  # seconds
+        dt = 0.3  # seconds
         N = int(np.ceil(horizon / dt))  # seconds
 
         optimizer = TrajectoryOptimizer(horizon=horizon, N=N, dt=dt)
 
         X, U, S = optimizer.optimize(
-            current_x0, s_target, k_ref_fun, v_min_fun,
+            current_x0, s_target, s_total, k_ref_fun, v_min_fun,
             v_max_fun, min_speed_limit, is_final_chunk
         )
 
-        # Solution concatenation
-        # --> len(X) = N+1
-        # --> Last point of Chunk K = start point of Chunk K+1.
-        if len(X_full) == 0:
-            X_full.append(X)
-            U_full.append(U)
-            S_full.append(S)
+        # --- Receding horizon ---
+        if not is_final_chunk:
+            commit_steps = int(N/2)  # Only save half of the steps
+            # Slice solution
+            X_sliced = X[:commit_steps]
+            U_sliced = U[:commit_steps]
+            S_sliced = S[:commit_steps]
+
+            # Add solution to the solutions list
+            # --> len(X) = N+1
+            # --> Last state of chunk K = start point of Chunk K+1.
+            if len(X_full) == 0:
+                X_full.append(X_sliced)
+                U_full.append(U_sliced)
+                S_full.append(S_sliced)
+            else:
+                # Avoid duplicated first point
+                X_full.append(X_sliced[1:])
+                U_full.append(U_sliced)
+                S_full.append(S_sliced)
         else:
-            # Avoid duplicated first point
             X_full.append(X[1:])
             U_full.append(U)
             S_full.append(S)
 
         # Update state for next loop
-        current_x0 = X[-1]  # Start next chunk where we ended
+        current_x0 = X_full[-1][-1]  # Start next chunk where we ended
         remaining_dist = s_total - current_x0[0]
 
         chunk_nb += 1
@@ -730,7 +740,7 @@ def recreate_trajectory(X, route):
     detailed_points, reference_path_spline, speed_limits, ref_s_values, s_total = unpack_reference_path(route)
 
     # Total trajectory time
-    dt = 0.5
+    dt = 0.3
     total_time = (len(X) - 1) * dt
 
     # Interpolator s -> t (parametric)
@@ -804,7 +814,6 @@ def recreate_trajectory(X, route):
     plt.show()
 
 
-
 if __name__ == '__main__':
     # Route locations
     start = 'Avenue Lincoln 1680, H3H 1G9 Montréal, Québec, Canada'
@@ -813,6 +822,8 @@ if __name__ == '__main__':
     # end = 'Université de Montréal'
     # start = 'Musée des Beaux-Arts de Montréal'
     # end = 'Concordia University (SGW Campus)'
+    # start = 'Musée des Beaux-Arts de Montréal'
+    # end = 'nesto mortgages-hypothèques'
     locations_list = [start, end]
     vehicle = 'car'  # ['car', 'truck']
 
@@ -821,6 +832,16 @@ if __name__ == '__main__':
 
     # Trajectory
     X, U, S = optimize_full_trajectory(GraphHopper_route)
+
+    # # Save optimal trajectory on a JSON file
+    # trajectory = {
+    #     'X': X.tolist(),
+    #     'U': U.tolist(),
+    #     'S': S.tolist()
+    # }
+    # import json
+    # with open("trajectory.json", "w") as file:
+    #     json.dump(trajectory, file, indent=4)
 
     # Plot solution
     plot_results(X, U, S)
