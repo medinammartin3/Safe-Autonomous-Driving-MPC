@@ -4,7 +4,7 @@ from scipy.optimize import minimize
 from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 
-# TODO: Lagrangians, Sanity checks, fine-tune dt and max_chunk_size
+# TODO: Lagrangians, Sanity checks
 
 class TrajectoryOptimizer:
     """
@@ -191,34 +191,24 @@ class TrajectoryOptimizer:
         constraints = []
 
         # --- Dynamics constraints ---
-        # Hermite-Simpson collocation
         # (Enforce continuity between Multiple Shooting windows)
         for k in range(N):
-            def dynamics_constraints(z, k=k):
+            # Explicit–Euler Collocation
+            def dynamics_constraint(z, k=k):
                 X, U, _ = self.unpack(z)
+
                 x_k = X[k]
                 x_next = X[k + 1]
                 u_k = U[k]
-                dt = self.dt
 
-                # Dynamics at the endpoints (k and k+1)
+                # Dynamics at point k
                 k_ref_k = k_ref_fun(x_k[0])
                 f_k = self.dynamics(x_k, u_k, k_ref_k)
 
-                k_ref_next = k_ref_fun(x_next[0])
-                f_next = self.dynamics(x_next, u_k, k_ref_next)
-
-                # Estimate the state at the midpoint (k + 1/2)
-                x_mid = 0.5 * (x_k + x_next) + (dt / 8.0) * (f_k - f_next)
-
-                # Dynamics at the midpoint
-                k_ref_mid = k_ref_fun(x_mid[0])
-                f_mid = self.dynamics(x_mid, u_k, k_ref_mid)
-
-                # Simpson's Rule
-                defect = x_next - x_k - (dt / 6.0) * (f_k + 4 * f_mid + f_next)
+                # Euler step : x_{k+1} = x_k + dt * f_k
+                defect = x_next - (x_k + self.dt * f_k)
                 return defect
-            constraints.append({"type": "eq", "fun": dynamics_constraints})
+            constraints.append({"type": "eq", "fun": dynamics_constraint})
 
 
         # --- Initial state constraint ---
@@ -229,13 +219,21 @@ class TrajectoryOptimizer:
 
 
         # --- Terminal constraints ----
-        # s_N = s_target for final chunk (reach final destination)
         if is_final_chunk:
+            # s_N = s_target (reach final destination)
             def terminal_s(z):
                 X, _, _ = self.unpack(z)
                 s_N = X[N, 0]
                 return s_N - s_target
             constraints.append({'type': 'eq', 'fun': terminal_s})
+
+            # v = 0 (stop at final destination)
+            def terminal_v(z):
+                X, _, _ = self.unpack(z)
+                v_N = X[N, 4]
+                return v_N
+            constraints.append({'type': 'eq', 'fun': terminal_v})
+
         # s_N >= s_target for intermediate chunks
         # (arrive at least to the chunk target and go further if you have time)
         else:
@@ -244,14 +242,6 @@ class TrajectoryOptimizer:
                 s_N = X[N, 0]
                 return s_N - s_target
             constraints.append({'type': 'ineq', 'fun': terminal_s})
-
-        # v = 0 only at the final chunk
-        if is_final_chunk:
-            def terminal_v(z):
-                X, _, _ = self.unpack(z)
-                v_N = X[N, 4]
-                return v_N
-            constraints.append({'type': 'eq', 'fun': terminal_v})
 
 
         # ---- Safety constraints ----
@@ -490,7 +480,6 @@ def optimize_full_trajectory(route, max_chunk_size=20):
 
     print(f"Total Distance : {s_total:.2f} m")
     remaining_dist = s_total
-    chunk_nb = 1
 
     while remaining_dist > 0.1:
 
@@ -553,8 +542,6 @@ def optimize_full_trajectory(route, max_chunk_size=20):
         # Update state for next loop
         current_x0 = X_full[-1][-1]  # Start next chunk where we ended
         remaining_dist = s_total - current_x0[0]
-
-        chunk_nb += 1
 
     # Concatenate chunk solutions
     X_final = np.concatenate(X_full, axis=0)
