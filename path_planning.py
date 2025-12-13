@@ -4,11 +4,14 @@ import requests
 import pymap3d as pm
 import numpy as np
 import matplotlib
-matplotlib.use("MacOSX")  # Change accordingly to your OS
 import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
 from scipy.interpolate import CubicSpline
 from dotenv import load_dotenv
+try:
+    matplotlib.use('MacOSX')
+except:
+    matplotlib.use('TkAgg')
 
 # Get API Key
 load_dotenv()
@@ -48,13 +51,12 @@ def get_coordinates(locations):
     return locations_coord
 
 
-def get_route(locations, vehicle_type):
+def get_route(locations):
     """
     Get route from GraphHopper with points on geo-coordinates.
 
     Parameters:
         - locations: list of locations
-        - vehicle_type: type of vehicle
     """
     url = 'https://graphhopper.com/api/1/route'
 
@@ -65,7 +67,7 @@ def get_route(locations, vehicle_type):
 
     params = {
         'point': [f'{start_coord[0]},{start_coord[1]}', f'{end_coord[0]},{end_coord[1]}'],
-        'profile': vehicle_type,
+        'profile': 'car',
         'points_encoded': False,
         'details': ['lanes', 'max_speed'],
         'key': API_KEY
@@ -146,7 +148,7 @@ def add_extra_points(point1, point2):
     return extra_points
 
 
-def crate_spline(points):
+def create_spline(points):
     """
     Build a cubic spline from a sequence of way-points.
 
@@ -182,6 +184,8 @@ def get_reference_path(route):
     # Map projection to local coordinates
     local_points = global2local(points)
 
+    # TODO: smooth turns
+
     # Add extra points
     detailed_path = []
     for i in range(len(local_points) - 1):
@@ -198,7 +202,7 @@ def get_reference_path(route):
     detailed_path.append(local_points[-1])   # Add last/final point
 
     # Build spline
-    spline = crate_spline(detailed_path)
+    spline = create_spline(detailed_path)
 
     return local_points, detailed_path, spline
 
@@ -309,7 +313,7 @@ def plot_path(route, original_points, spline, extra_points, show_extra_points=Fa
             # Find speed limit interval
             limit_value = None
             for (interval_start, interval_end), (_, _), value in speed_limits:
-                if interval_start <= idx <= interval_end:
+                if interval_start <= idx < interval_end:
                     limit_value = value*3.6  # m/s to km/h
                     break
 
@@ -342,15 +346,14 @@ if __name__ == '__main__':
     # Route locations
     start = 'Avenue Lincoln 1680, H3H 1G9 Montréal, Québec, Canada'
     end = 'Tim Hortons, Rue Guy 2081, H3H 2L9 Montréal, Québec, Canada'
-    # start = 'McGill University'
-    # end = 'Université de Montréal'
+    # start = "Avenue du Parc, H2V 2G4 Montréal, Québec, Canada"
+    # end = "1505 Voie Camillien-Houde, Montréal, QC H3H 1A1"
     # start = 'Musée des Beaux-Arts de Montréal'
     # end = 'Concordia University (SGW Campus)'
     locations_list = [start, end]
-    vehicle = 'car'  # ['car', 'truck']
 
     # Reference path
-    GraphHopper_route = get_route(locations_list, vehicle)
+    GraphHopper_route = get_route(locations_list)
     (way_points, extra_way_points, reference_path), speed_limits_list = get_path_and_speed_limits(GraphHopper_route)
 
     print(f'Real Distance: {GraphHopper_route["distance"]} m')
