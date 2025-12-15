@@ -1,10 +1,10 @@
 import numpy as np
+from sanity_checks import reference_trajectory_check
 from path_planning import get_route, get_path_and_speed_limits
 from scipy.optimize import minimize
 from scipy.interpolate import interp1d
-import matplotlib.pyplot as plt
 
-# TODO: Lagrangians, Sanity checks
+# TODO: Sanity checks
 
 class TrajectoryOptimizer:
     """
@@ -12,9 +12,9 @@ class TrajectoryOptimizer:
     By solving the problem, we get the optimal reference trajectory that will be used in online tracking.
     """
 
-    def __init__(self, horizon=None, N=None, dt=None, vehicle_type='car', w_y=10.0, w_s=10.0, w_u=0.1, w_slack=100.0):
+    def __init__(self, horizon=None, N=None, dt=None, w_y=10.0, w_s=10.0, w_u=0.1, w_slack=100.0):
 
-        # Multiple shooting configuration
+        # Configuration
         self.T = horizon
         self.N = N
         self.dt = dt
@@ -29,32 +29,23 @@ class TrajectoryOptimizer:
         """
         u1_min = Max Steering Rate (Right)
         u1_max = Min Steering Rate (Left)
-        
+
         u2_min = Max Braking Deceleration
         u2_max = Min Engine Acceleration
         """
-        if vehicle_type == 'car':
-            self.u_min = np.array([-0.6, -5.0])
-            self.u_max = np.array([0.6, 4.0])
-        if vehicle_type == 'truck':
-            self.u_min = np.array([-0.2, -4.0])
-            self.u_max = np.array([0.2, 3.5])
+        self.u_min = np.array([-0.6, -5.0])
+        self.u_max = np.array([0.6, 4.0])
 
         # Curvature bounds
         """
         k_min = Max Curvature (Right Turn)
         k_max = Max Curvature (Left Turn)
         """
-        if vehicle_type == 'car':
-            self.k_min = -0.8
-            self.k_max = 0.8
-        if vehicle_type == 'truck':
-            self.k_min = -0.4
-            self.k_max = 0.4
+        self.k_min = -0.8
+        self.k_max = 0.8
 
         # Lateral acceleration bound
-        self.a_max = 4.0
-
+        self.a_max = 6.0
 
     @staticmethod
     def dynamics(x, u, k_ref):
@@ -84,7 +75,7 @@ class TrajectoryOptimizer:
         denom = 1 - d * k_ref
         # Avoid division by zero
         if abs(denom) < 1e-4:
-            denom = 1e-4 * np.sign(denom)
+            denom = 1e-4 * np.sign(denom) if denom != 0 else 1e-4
 
         # Dynamics
         s_dot = (v * np.cos(o)) / denom
@@ -98,12 +89,11 @@ class TrajectoryOptimizer:
 
         return x_dot
 
-
     def unpack(self, z):
         """
         Convert the flat vector z into structured matrices.
 
-        z structure: [ X0, X1, ..., XN, U0, ..., U_{N-1}, slack0...slack_{N-1} ]
+        z structure: [ X0, X1, ..., XN, U0, ..., U_{N-1}, S_0...S{N-1} ]
         """
         states_vars_num = 5
         controls_num = 2
@@ -111,18 +101,17 @@ class TrajectoryOptimizer:
 
         # States
         end_x_idx = (N + 1) * states_vars_num
-        X = z[0 : end_x_idx]
+        X = z[0: end_x_idx]
         X = X.reshape(N + 1, states_vars_num)  # Matrix of shape (N+1, 5)
 
         # Controls
         end_u_idx = end_x_idx + N * controls_num
-        U = z[end_x_idx : end_u_idx]
+        U = z[end_x_idx: end_u_idx]
         U = U.reshape(N, controls_num)  # Matrix of shape (N, 2)
 
         # Slack
         S = z[end_u_idx:]  # N vector
         return X, U, S
-
 
     @staticmethod
     def pack(X, U, S):
@@ -136,7 +125,6 @@ class TrajectoryOptimizer:
         # Unify into a single vector
         z = np.concatenate([flatten_X, flatten_U, flatten_S])
         return z
-
 
     def cost(self, z, x0, s_total):
         """"
@@ -164,59 +152,71 @@ class TrajectoryOptimizer:
 
             # --- Cost function terms ---
 
-            # 1. Tracking error (lateral + orientation)
+            # Tracking error (lateral + orientation)
             y_k = np.array([d_k, o_k])
-            term1 = self.w_y * y_k @ y_k
+            term1 = self.w_y * (y_k @ y_k)
 
-            # 2. Progress cost (Minimize distance to global destination/target)
+            # Progress cost (Minimize distance to global destination/target)
             s0 = x0[0]
             denom = max(1, s_total - s0)  # No normalization if path length < 1 meter
             term2 = self.w_s * ((s_total - s_k) / denom) ** 2
 
-            # 3. Control effort (Reduce energy consumption and maximize passenger comfort)
-            term3 = self.w_u * np.dot(u_k, u_k)
+            # Control effort (Reduce energy/fuel consumption and maximize passenger comfort)
+            term3 = self.w_u * (u_k @ u_k)
 
-            # 4. Slack penalty (Minimizes the slack variable for velocity relaxation)
+            # Slack penalty (Minimize the slack variable for velocity relaxation)
             term4 = self.w_slack * (slack_k ** 2)
 
             cost += term1 + term2 + term3 + term4
         return cost
 
-
-    def constraints(self, x0, s_target, k_ref_fun, v_min_fun, v_max_fun, is_final_chunk=False):
+    def constraints(self, x0, s_target, k_ref_fun, v_min_fun, v_max_fun, is_final_chunk):
         """
         System constraints.
         """
         N = self.N
         constraints = []
 
-        # --- Dynamics constraints ---
-        # (Enforce continuity between Multiple Shooting windows)
+        # --- Dynamics constraint ---
+        # Enforce dynamic feasibility and continuity (defects = 0)
         for k in range(N):
-            # Explicit–Euler Collocation
-            def dynamics_constraint(z, k=k):
+            # Hermite-Simpson collocation
+            def dynamics_constraints(z, k=k):
                 X, U, _ = self.unpack(z)
-
                 x_k = X[k]
                 x_next = X[k + 1]
                 u_k = U[k]
+                dt = self.dt
 
-                # Dynamics at point k
+                # Dynamics at the endpoints (k and k+1)
                 k_ref_k = k_ref_fun(x_k[0])
                 f_k = self.dynamics(x_k, u_k, k_ref_k)
 
-                # Euler step : x_{k+1} = x_k + dt * f_k
-                defect = x_next - (x_k + self.dt * f_k)
-                return defect
-            constraints.append({"type": "eq", "fun": dynamics_constraint})
+                k_ref_next = k_ref_fun(x_next[0])
+                f_next = self.dynamics(x_next, u_k, k_ref_next)
 
+                # Estimate the state at the midpoint (k + 1/2)
+                x_mid = 0.5 * (x_k + x_next) + (dt / 8.0) * (f_k - f_next)
+
+                # Dynamics at the midpoint
+                k_ref_mid = k_ref_fun(x_mid[0])
+                f_mid = self.dynamics(x_mid, u_k, k_ref_mid)
+
+                # Simpson's Rule
+                x_pred = x_k - (dt / 6.0) * (f_k + 4 * f_mid + f_next)
+
+                defect = x_next - x_pred
+                return defect
+
+            constraints.append({"type": "eq", "fun": dynamics_constraints})
 
         # --- Initial state constraint ---
+        # Enforce continuity between chunks
         def initial_x0(z):
             X, _, _ = self.unpack(z)
-            return X[0] - x0
-        constraints.append({"type": "eq", "fun": initial_x0})
+            return X[0] - x0  # x0 = Final state of previous chunk
 
+        constraints.append({"type": "eq", "fun": initial_x0})
 
         # --- Terminal constraints ----
         if is_final_chunk:
@@ -225,6 +225,7 @@ class TrajectoryOptimizer:
                 X, _, _ = self.unpack(z)
                 s_N = X[N, 0]
                 return s_N - s_target
+
             constraints.append({'type': 'eq', 'fun': terminal_s})
 
             # v = 0 (stop at final destination)
@@ -232,17 +233,18 @@ class TrajectoryOptimizer:
                 X, _, _ = self.unpack(z)
                 v_N = X[N, 4]
                 return v_N
+
             constraints.append({'type': 'eq', 'fun': terminal_v})
 
-        # s_N >= s_target for intermediate chunks
-        # (arrive at least to the chunk target and go further if you have time)
+        # s_N >= s_target/2 for intermediate chunks
+        # (arrive at least to half of the chunk target and go further if you have time)
         else:
             def terminal_s(z):
                 X, _, _ = self.unpack(z)
                 s_N = X[N, 0]
-                return s_N - s_target
-            constraints.append({'type': 'ineq', 'fun': terminal_s})
+                return s_N - s_target / 2
 
+            constraints.append({'type': 'ineq', 'fun': terminal_s})
 
         # ---- Safety constraints ----
         for k in range(N + 1):
@@ -252,10 +254,11 @@ class TrajectoryOptimizer:
                 if k < N:
                     slack = S[k]
                 else:
-                    slack = 0 # No slack on final state
+                    slack = 0  # No slack on final state
                 s_k = X[k, 0]
                 v_k = X[k, 4]
                 return (v_k + slack) - v_min_fun(s_k)
+
             constraints.append({"type": "ineq", "fun": speed_min})
 
             def speed_max(z, k=k):
@@ -263,10 +266,11 @@ class TrajectoryOptimizer:
                 if k < N:
                     slack = S[k]
                 else:
-                    slack = 0
+                    slack = 0  # No slack on final state
                 s_k = X[k, 0]
                 v_k = X[k, 4]
                 return v_max_fun(s_k) - (v_k + slack)
+
             constraints.append({"type": "ineq", "fun": speed_max})
 
             # Lateral acceleration : avoid excessive lateral forces
@@ -276,6 +280,7 @@ class TrajectoryOptimizer:
                 k_k = X[k, 3]
                 v_k = X[k, 4]
                 return self.a_max - (k_k * v_k ** 2)
+
             constraints.append({"type": "ineq", "fun": lateral_max})
 
             def lateral_min(z, k=k):
@@ -283,8 +288,8 @@ class TrajectoryOptimizer:
                 k_k = X[k, 3]
                 v_k = X[k, 4]
                 return self.a_max + (k_k * v_k ** 2)
-            constraints.append({"type": "ineq", "fun": lateral_min})
 
+            constraints.append({"type": "ineq", "fun": lateral_min})
 
         # --- Physical constraints ---
         # Curvature limits
@@ -293,14 +298,15 @@ class TrajectoryOptimizer:
                 X, _, _ = self.unpack(z)
                 k_k = X[k, 3]
                 return k_k - self.k_min
+
             constraints.append({"type": "ineq", "fun": k_min})
 
             def k_max(z, k=k):
                 X, _, _ = self.unpack(z)
                 k_k = X[k, 3]
                 return self.k_max - k_k
-            constraints.append({"type": "ineq", "fun": k_max})
 
+            constraints.append({"type": "ineq", "fun": k_max})
 
         # --- Controls constraints ---
         # Curvature bounds
@@ -309,12 +315,14 @@ class TrajectoryOptimizer:
                 _, U, _ = self.unpack(z)
                 u1_k = U[k, 0]
                 return u1_k - self.u_min[0]
+
             constraints.append({"type": "ineq", "fun": u1_min})
 
             def u1_max(z, k=k):
                 _, U, _ = self.unpack(z)
                 u1_k = U[k, 0]
                 return self.u_max[0] - u1_k
+
             constraints.append({"type": "ineq", "fun": u1_max})
 
             # Acceleration/deceleration bounds
@@ -322,41 +330,43 @@ class TrajectoryOptimizer:
                 _, U, _ = self.unpack(z)
                 u2_k = U[k, 1]
                 return u2_k - self.u_min[1]
+
             constraints.append({"type": "ineq", "fun": u2_min})
 
             def u2_max(z, k=k):
                 _, U, _ = self.unpack(z)
                 u2_k = U[k, 1]
                 return self.u_max[1] - u2_k
+
             constraints.append({"type": "ineq", "fun": u2_max})
 
             # Slack non-negative
             def non_negative_slack(z, k=k):
                 _, _, S = self.unpack(z)
                 return S[k]
+
             constraints.append({"type": "ineq", "fun": non_negative_slack})
 
         return constraints
 
-
-    def optimize(self, x0, s_target, s_total, k_ref_fun, v_min_fun, v_max_fun, min_speed_limit, is_final_chunk=False):
+    def optimize(self, x0, s_target, s_total, k_ref_fun, v_min_fun, v_max_fun, is_final_chunk):
         """
         Solve the NLP.
         """
         N = self.N
 
-        # --- Initial guess (Warm start) ---
+        # --- Initial guess ---
         # Linearly interpolate s from 0 to s_target and assume a constant moderate velocity.
 
-        # States
+        # State (Warm start with last state speed)
         X_init = np.zeros((N + 1, 5))
         X_init[:, 0] = np.linspace(x0[0], s_target, N + 1)  # Linearly increase s
         if is_final_chunk:
             # Slow down velocity until 0 on final horizon
-            X_init[:, 4] = np.linspace(max(x0[4], min_speed_limit), 0.0, N + 1)
+            X_init[:, 4] = np.linspace(x0[4], 0.0, N + 1)
         else:
-            # Keep constant speed guess on intermediate horizons
-            X_init[:, 4] = max(x0[4], min_speed_limit)
+            # Keep constant initial speed guess on intermediate horizons
+            X_init[:, 4] = x0[4]
 
         # Controls
         U_init = np.zeros((N, 2))
@@ -374,7 +384,7 @@ class TrajectoryOptimizer:
             x0=z0,
             method='SLSQP',
             constraints=constraints,
-            options={'maxiter': 300, 'ftol': 1e-4, 'disp': True}
+            options={'maxiter': 500, 'ftol': 1e-4, 'disp': True}
         )
 
         X_sol, U_sol, S_sol = self.unpack(solution.x)
@@ -404,16 +414,16 @@ def unpack_reference_path(route):
     s_values = np.concatenate([[0], np.cumsum(distances)])
     s_total = s_values[-1]
 
-    return  [points, spline, speed_limits, s_values, s_total]
+    return [points, spline, speed_limits, s_values, s_total]
 
 
 def optimize_full_trajectory(route, max_chunk_size=20):
     """
-    Compute the full optimal reference trajectory with a chunked (segmented) optimization scheme
+    MPC for computing the full optimal reference trajectory with a closed-loop chunked (segmented) optimization scheme
     and applying receding horizon principle for ensuring feasibility and computational efficiency.
-    Each chunk serves the role of a 'context window' for telling to the optimizer what's coming next
+    Each chunk serves the role of a 'context window' (feedback) for telling to the optimizer what's coming next
     (turns, new speed limits, destination approaching, etc.), so he can prepare and ensure smooth transitions.
-    No feedback is applied, the optimal trajectory is deterministic.
+    There's no noise in the dynamics/controls, the optimal trajectory is deterministic.
 
     Parameters:
         - route : route from GraphHopper.
@@ -455,11 +465,9 @@ def optimize_full_trajectory(route, max_chunk_size=20):
     v_max_array = np.ones(len(detailed_points))
     for limit in speed_limits:
         (_, _), (idx_start, idx_end), value = limit
-        v_max_array[idx_start : idx_end + 1] = value  # assign speed limit to that path segment
+        v_max_array[idx_start: idx_end + 1] = value  # assign speed limit to that path segment
 
-    min_speed_limit = np.min(v_max_array)
-
-    # Interpolation because data is discrete but physics is continuous
+    # Interpolation because data is discrete but physics are continuous
     v_max_interpolator = interp1d(s_values, v_max_array, kind='previous', fill_value="extrapolate")
 
     def v_max_fun(s):
@@ -495,7 +503,7 @@ def optimize_full_trajectory(route, max_chunk_size=20):
         current_s = current_x0[0]
         s_target = current_s + chunk_size
 
-        print(f"==> Distance traveled --> {current_s:.2f} m ({current_s/s_total*100:.2f}%)")
+        print(f"==> Distance traveled --> {current_s:.2f} m ({current_s / s_total * 100:.2f}%)")
 
         avg_speed = np.mean(v_max_array[int(current_s / 5):])  # Points every 5 m
         est_time = chunk_size / avg_speed
@@ -509,16 +517,14 @@ def optimize_full_trajectory(route, max_chunk_size=20):
 
         optimizer = TrajectoryOptimizer(horizon=horizon, N=N, dt=dt)
 
-        X, U, S = optimizer.optimize(
-            current_x0, s_target, s_total, k_ref_fun, v_min_fun,
-            v_max_fun, min_speed_limit, is_final_chunk
-        )
+        X, U, S = optimizer.optimize(current_x0, s_target, s_total, k_ref_fun,
+                                v_min_fun,v_max_fun, is_final_chunk)
 
         # --- Receding horizon ---
         if not is_final_chunk:
             commit_steps = int(N/2)  # Only save half of the steps
             # Slice solution
-            X_sliced = X[:commit_steps]
+            X_sliced = X[:commit_steps + 1]
             U_sliced = U[:commit_steps]
             S_sliced = S[:commit_steps]
 
@@ -539,7 +545,7 @@ def optimize_full_trajectory(route, max_chunk_size=20):
             U_full.append(U)
             S_full.append(S)
 
-        # Update state for next loop
+        # Update state for next optimization
         current_x0 = X_full[-1][-1]  # Start next chunk where we ended
         remaining_dist = s_total - current_x0[0]
 
@@ -548,274 +554,45 @@ def optimize_full_trajectory(route, max_chunk_size=20):
     U_final = np.concatenate(U_full, axis=0)
     S_final = np.concatenate(S_full, axis=0)
 
-    # Sanity Check on the full result
-    sanity_checks(TrajectoryOptimizer(), X_final, U_final, S_final, s_total)
+    # Sanity check on the full result
+    reference_trajectory_check(TrajectoryOptimizer(), X_final, U_final, S_final, s_total)
 
     return X_final, U_final, S_final
 
 
-def sanity_checks(optimizer, X, U, S, s_total):
-    """
-    Verifies the physical feasibility of the optimized trajectory.
-    """
-    print("\n=== SANITY CHECKS ===")
-
-    passed = True
-
-    # Thresholds
-    DISTANCE_TOL = 0.5  # meters
-    VELOCITY_TOL = 0.1  # km/h
-    CONTROLS_TOL = 0.1
-    LATERAL_DEV_TOL = 4.0  # meters (Max lateral deviation allowed)
-    SLACK_TOL = 0.1
-
-    # --- Destination ---
-    s_final = X[-1, 0]
-    error_s = abs(s_final - s_total)
-    if error_s > DISTANCE_TOL:
-        print(f'Final destination reached : False --> Error = {error_s} m')
-        passed = False
-    else:
-        print(f'Final destination reached : True')
-
-    # --- Full Stop ---
-    v_final = X[-1, 4]
-    if abs(v_final) > VELOCITY_TOL:
-        print(f'Full stop at the end : False --> Final velocity = {v_final*3.6} km/h')
-        passed = False
-    else:
-        print(f'Full stop at the end : True')
-
-    # --- Reverse Driving ---
-    min_v = np.min(X[:, 4])
-    if min_v < -VELOCITY_TOL:
-        print(f'Always non-negative velocity : False --> Minimum velocity = {min_v*3.6} km/h')
-        passed = False
-    else:
-        print(f'Always non-negative velocity : True')
-
-    # --- Control Bounds ---
-    u1_min, u2_min = optimizer.u_min
-    u1_max, u2_max = optimizer.u_max
-
-    # U1 (Curvature)
-    u1_check = not(np.min(U[:, 0]) < u1_min - CONTROLS_TOL and np.max(U[:, 0]) > u1_max + CONTROLS_TOL)
-    print(f'Curvature rate limits respected : {u1_check}')
-    if passed:
-        passed = u1_check
-
-    # U2 (Acceleration)
-    u2_check = not(np.min(U[:, 1]) < u2_min - CONTROLS_TOL and np.max(U[:, 1]) > u2_max + CONTROLS_TOL)
-    print(f'Acceleration limits respected : {u2_check}')
-    if passed:
-        passed = u2_check
-
-    # --- Lateral Deviation ---
-    max_lat_dev = np.max(np.abs(X[:, 1]))
-    if max_lat_dev > LATERAL_DEV_TOL:
-        print(f'Lateral deviation respected : False --> Maximum lateral deviation : {max_lat_dev} m')
-        passed = False
-    else:
-        print(f'Lateral deviation respected : True')
-
-    # --- Slack Variable ---
-    max_slack = np.max(np.abs(S))
-    if max_slack > SLACK_TOL:
-        print(f'Low slack usage : False --> Maximum slack value : {max_slack}')
-        passed = False
-    else:
-        print(f'Low slack usage : True')
-
-    print(f'===> Checks passed : {passed}')
-
-
-def plot_results(X, U, S):
-    """
-    Plot each variable of X, U, and S in separate figures.
-    """
-    marker = 'o'
-    marker_size = 3
-
-    # --- State variables (X) ---
-    state_names = [
-        "Distance Traveled (s)",
-        "Lateral Deviation (d)",
-        "Orientation Deviation (o)",
-        "Curvature (k)",
-        "Velocity (v)"
-    ]
-
-    # Travel distance + Curvature + Velocity
-    phys_indices = [0, 3, 4]
-    fig_phys, axs_phys = plt.subplots(1, 3, figsize=(18, 5))
-    fig_phys.suptitle("Optimal Vehicle State Trajectory (Physics)", fontsize=14)
-    for i, x_idx in enumerate(phys_indices):
-        ax = axs_phys[i]
-        if x_idx == 0:  # Distance
-            ax.plot(X[:, x_idx], marker=marker, ms=marker_size, color='tab:blue')
-            ax.set_ylabel("Distance ($m$)")
-        if x_idx == 3:  # Curvature
-            ax.plot(X[:, x_idx], marker=marker, ms=marker_size, color='tab:blue')
-            ax.set_ylabel(r"Curvature ($m^{-1}$)")
-        if x_idx == 4:  # Velocity
-            ax.plot(X[:, x_idx] * 3.6, marker=marker, ms=marker_size, color='tab:blue')  # m/s to km/h
-            ax.set_ylabel("Velocity ($km/h$)")
-        ax.set_title(state_names[x_idx])
-        ax.set_xlabel("Step")
-        ax.grid(True)
-    plt.tight_layout(w_pad=1.7)
-
-    # Lateral deviation + Orientation deviation
-    err_indices = [1, 2]
-    fig_err, axs_err = plt.subplots(1, 2, figsize=(12, 5))
-    fig_err.suptitle("Trajectory Tracking Errors", fontsize=14)
-    for i, x_idx in enumerate(err_indices):
-        ax = axs_err[i]
-        if x_idx == 1:  # Lateral
-            ax.plot(X[:, x_idx], marker=marker, ms=marker_size, color='tab:red')
-            ax.set_ylabel(r"Deviation ($m$)")
-        if x_idx == 2:  # Orientation
-            ax.plot(X[:, x_idx], marker=marker, ms=marker_size, color='tab:red')
-            ax.set_ylabel(r"Deviation ($rad$)")
-        ax.axhline(0, color='black', linestyle='--', linewidth=1.5, alpha=0.5, label="Ideal")  # Zero line (ideal value)
-        ax.set_title(state_names[x_idx])
-        ax.set_xlabel("Step")
-        ax.legend()
-        ax.grid(True)
-    plt.tight_layout()
-
-
-    # --- Controls (U) ---
-    control_names = ["Curvature Rate ($u_1$)", "Acceleration ($u_2$)"]
-
-    fig_U, axs = plt.subplots(1, 2, figsize=(12, 5))
-    fig_U.suptitle("Optimal Controls (U)", fontsize=14)
-
-    for i in range(2):
-        if i == 0:  # Curvature
-            axs[i].plot(U[:, i], marker=marker, color='tab:orange', ms=marker_size)
-            axs[i].set_ylabel(r"Input Value ($m^{-1}s^{-1}$)")
-        if i == 1:  # Acceleration
-            axs[i].plot(U[:, i], marker=marker, color='tab:orange', ms=marker_size)
-            axs[i].set_ylabel(r"Input Value ($m/s^2$)")
-        axs[i].plot(U[:, i], marker=marker, color='orange', ms=marker_size)
-        axs[i].set_title(control_names[i])
-        axs[i].set_xlabel("Step")
-        axs[i].grid(True)
-    plt.tight_layout()
-
-
-    # --- Slack (S) ---
-    plt.figure()
-    plt.plot(S * 3.6, marker=marker, color='tab:green', ms=marker_size)  # m/s to km/h
-    plt.title("Optimal Velocity Slack Variable (S)")
-    plt.xlabel("Step")
-    plt.ylabel(r"Value ($km/h$)")
-    plt.grid(True)
-    plt.tight_layout()
-
-    plt.show()
-
-
-def recreate_trajectory(X, route):
-    """
-    Reconstructs and plots the path of the optimized trajectory (tracked from the GraphHopper reference path).
-    It also plots the reference path and add visual road boundaries to verify the vehicle's tracking performance
-    and path feasibility.
-    """
-    # Reference path
-    detailed_points, reference_path_spline, speed_limits, ref_s_values, s_total = unpack_reference_path(route)
-
-    # Total trajectory time
-    dt = 0.3
-    total_time = (len(X) - 1) * dt
-
-    # Interpolator s -> t (parametric)
-    t_max = len(detailed_points) - 1
-    t_values = np.linspace(0.0, t_max, len(detailed_points))
-    s_to_t = interp1d(ref_s_values, t_values, kind='linear', fill_value='extrapolate')
-
-    x_spl, y_spl = reference_path_spline
-
-    # Transform solution (s, d) -> (x, y)
-    traj_x = []
-    traj_y = []
-
-    # Road boundaries
-    left_bound_x, left_bound_y = [], []
-    right_bound_x, right_bound_y = [], []
-
-    lane_width = 3.5  # meters
-
-    # --- Re-create the reference path (spline) and optimal trajectory (solution) ---
-    for i in range(len(X)):
-        s_vehicle = X[i, 0]
-        d_vehicle = X[i, 1]
-
-        # Reference point
-        t = float(s_to_t(s_vehicle))
-        x_ref = float(x_spl(t))
-        y_ref = float(y_spl(t))
-
-        # Reference angle (tangent angle of the spline)
-        dx = float(x_spl(t, 1))
-        dy = float(y_spl(t, 1))
-        angle = np.arctan2(dy, dx)
-
-        # Calculate vehicle's (optimal trajectory) position
-        # d > 0 = Left, d < 0 = Right
-        x_actual = x_ref - d_vehicle * np.sin(angle)
-        y_actual = y_ref + d_vehicle * np.cos(angle)
-
-        traj_x.append(x_actual)
-        traj_y.append(y_actual)
-
-        # Calculate road boundaries
-        left_bound_x.append(x_ref - lane_width * np.sin(angle))
-        left_bound_y.append(y_ref + lane_width * np.cos(angle))
-        right_bound_x.append(x_ref - (-lane_width) * np.sin(angle))
-        right_bound_y.append(y_ref + (-lane_width) * np.cos(angle))
-
-    # --- Plot ---
-    plt.figure(figsize=(12, 8))
-
-    # Plot Reference Path (centerline)
-    fine_t = np.linspace(0, t_max, 1000)
-    plt.plot(x_spl(fine_t), y_spl(fine_t), 'k--', alpha=0.5, label='Reference Path (GraphHopper)')
-
-    # Plot road boundaries
-    plt.plot(left_bound_x, left_bound_y, 'k-', linewidth=0.5, alpha=0.3)
-    plt.plot(right_bound_x, right_bound_y, 'k-', linewidth=0.5, alpha=0.3, label='Road Boundaries')
-
-    # Plot optimal trajectory
-    velocities = X[:, 4] * 3.6  # m/s to km/h
-    trajectory = plt.scatter(traj_x, traj_y, c=velocities, cmap='plasma', s=30, label='Optimal Trajectory')
-
-    plt.colorbar(trajectory, label='Velocity (km/h)')
-    plt.legend()
-    plt.xlabel('X (m)')
-    plt.ylabel('Y (m)')
-    plt.title(f'Optimal Trajectory Visualization | Distance : {s_total:.1f} m | Time : {total_time:.1f} s')
-    plt.axis('equal')
-    plt.grid(True)
-    plt.show()
-
-
 if __name__ == '__main__':
-    # Route locations
-    start = 'Avenue Lincoln 1680, H3H 1G9 Montréal, Québec, Canada'
-    end = 'Tim Hortons, Rue Guy 2081, H3H 2L9 Montréal, Québec, Canada'
-    # start = 'McGill University'
-    # end = 'Université de Montréal'
-    # start = 'Musée des Beaux-Arts de Montréal'
-    # end = 'Concordia University (SGW Campus)'
+    # --- Route locations ---
+    # trajectory1.json
     # start = 'Musée des Beaux-Arts de Montréal'
     # end = 'nesto mortgages-hypothèques'
+
+    # trajectory2.json
+    # start = "Musée des Beaux-Arts de Montréal"
+    # end = 'McGill University'
+
+    # trajectory3.json
+    # start = "Avenue du Parc, H2V 2G4 Montréal, Québec, Canada"
+    # end = "1505 Voie Camillien-Houde, Montréal, QC H3H 1A1"
+
+
+
+
+    # trajectory4.json
+    start = 'Musée des Beaux-Arts de Montréal'
+    end = 'Concordia University (SGW Campus)'
+
+    # trajectory5.json
+    # start = "Avenue du Parc, H2V 2G4 Montréal, Québec, Canada"
+    # end = "1505 Voie Camillien-Houde, Montréal, QC H3H 1A1"
+
+    # trajectory6.json
+    # start = "Rue Rachel Est 227, H2W 1E5 Montréal, QC, Canada"
+    # end = "Complexe funéraire Mont-Royal, La ligne bleue, H2V 3R5 Montréal, Québec, Canada"
+
     locations_list = [start, end]
-    vehicle = 'car'  # ['car', 'truck']
 
     # Route
-    GraphHopper_route = get_route(locations_list, vehicle)
+    GraphHopper_route = get_route(locations_list)
 
     # Trajectory
     X, U, S = optimize_full_trajectory(GraphHopper_route)
@@ -827,14 +604,11 @@ if __name__ == '__main__':
     #     'S': S.tolist()
     # }
     # import json
-    # with open("trajectory.json", "w") as file:
+    # with open("trajectories/trajectory4.json", "w") as file:
     #     json.dump(trajectory, file, indent=4)
 
+    from visualizations import plot_trajectory_optimization_results, recreate_optimal_trajectory
     # Plot solution
-    plot_results(X, U, S)
-
+    plot_trajectory_optimization_results(GraphHopper_route, X, U, S)
     # Plot trajectory visualization
-    recreate_trajectory(X, GraphHopper_route)
-
-
-
+    recreate_optimal_trajectory(X, GraphHopper_route)
