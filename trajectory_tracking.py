@@ -1,15 +1,15 @@
 import numpy as np
+from sanity_checks import trajectory_tracking_check
 from trajectory_loader import TrajectoryLoader
 from scipy.optimize import minimize
 import time
 
-# TODO: sanity checks
 
 class TrajectoryTracker:
     """
     Real-time MPC for tracking the optimal reference trajectory.
     """
-    def __init__(self, X_ref):
+    def __init__(self, X_ref=None):
         # Reference trajectory
         self.X_ref = X_ref
 
@@ -309,7 +309,7 @@ class ObstaclesFSM:
 
 
         """ --- Good Configuration for trajectory3.json --- """
-        # # Obstacle parameters
+        # # Dynamic Obstacle parameters
         # self.obs_trigger_s = 5.0        # Position of the vehicle when the obstacle appear
         # self.obs_start_s = 150.0        # Start position of the obstacle
         # self.obs_v = 4.0                # Speed of the obstacle (constant)
@@ -435,6 +435,10 @@ def run_simulation(mpc, fsm, trajectory):
             print(f"Step {step} | {vehicle_info} | Traffic Light : {tl_info} | Distance to obstacle : {obs_info}")
 
         step += 1
+
+    # Sanity checks
+    trajectory_tracking_check(TrajectoryTracker(), hist_x, hist_u, hist_t,
+                              hist_obs_s, hist_tl_state, fsm, trajectory.s_max)
 
     return np.array(hist_x), np.array(hist_u), np.array(hist_t), hist_preds, hist_obs_s, hist_tl_state, trajectory
 
