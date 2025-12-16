@@ -14,9 +14,6 @@ if not API_KEY:
     raise ValueError('GRAPHHOPPER_API_KEY not found in the .env file')
 
 
-# TODO: smooth turns
-
-
 def get_coordinates(locations):
     """
     Get coordinates from GraphHopper of a list of locations.

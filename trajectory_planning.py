@@ -4,7 +4,6 @@ from path_planning import get_route, get_path_and_speed_limits
 from scipy.optimize import minimize
 from scipy.interpolate import interp1d
 
-# TODO: Sanity checks
 
 class TrajectoryOptimizer:
     """
@@ -567,27 +566,12 @@ if __name__ == '__main__':
     # end = 'nesto mortgages-hypothèques'
 
     # trajectory2.json
-    # start = "Musée des Beaux-Arts de Montréal"
-    # end = 'McGill University'
+    start = "Musée des Beaux-Arts de Montréal"
+    end = 'McGill University'
 
     # trajectory3.json
     # start = "Avenue du Parc, H2V 2G4 Montréal, Québec, Canada"
     # end = "1505 Voie Camillien-Houde, Montréal, QC H3H 1A1"
-
-
-
-
-    # trajectory4.json
-    start = 'Musée des Beaux-Arts de Montréal'
-    end = 'Concordia University (SGW Campus)'
-
-    # trajectory5.json
-    # start = "Avenue du Parc, H2V 2G4 Montréal, Québec, Canada"
-    # end = "1505 Voie Camillien-Houde, Montréal, QC H3H 1A1"
-
-    # trajectory6.json
-    # start = "Rue Rachel Est 227, H2W 1E5 Montréal, QC, Canada"
-    # end = "Complexe funéraire Mont-Royal, La ligne bleue, H2V 3R5 Montréal, Québec, Canada"
 
     locations_list = [start, end]
 
@@ -604,7 +588,7 @@ if __name__ == '__main__':
     #     'S': S.tolist()
     # }
     # import json
-    # with open("trajectories/trajectory4.json", "w") as file:
+    # with open("trajectories/trajectory.json", "w") as file:
     #     json.dump(trajectory, file, indent=4)
 
     from visualizations import plot_trajectory_optimization_results, recreate_optimal_trajectory
