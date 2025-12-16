@@ -1,0 +1,6 @@
+requests
+pymap3d
+numpy
+scipy
+python-dotenv
+matplotlib
