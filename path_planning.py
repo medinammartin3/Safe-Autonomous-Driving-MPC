@@ -6,6 +6,8 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from dotenv import load_dotenv
 
+from typing import List, Tuple
+
 # Get API Key
 load_dotenv()
 API_KEY = os.getenv('GRAPHHOPPER_API_KEY')
@@ -14,7 +16,7 @@ if not API_KEY:
     raise ValueError('GRAPHHOPPER_API_KEY not found in the .env file')
 
 
-def get_coordinates(locations):
+def get_coordinates(locations: List[str]) -> List[Tuple[float, float]]:
     """
     Get coordinates from GraphHopper of a list of locations.
 
@@ -44,7 +46,7 @@ def get_coordinates(locations):
     return locations_coord
 
 
-def get_route(locations):
+def get_route(locations: List[str]) -> dict:
     """
     Get route from GraphHopper with points on geo-coordinates.
 
@@ -86,7 +88,7 @@ def get_route(locations):
     }
 
 
-def global2local(points):
+def global2local(points: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
     """
     Map projection : geo-coordinates to local coordinates (first point as origin).
 
@@ -105,7 +107,7 @@ def global2local(points):
     return local_points
 
 
-def get_midpoint(point1, point2):
+def get_midpoint(point1: Tuple[float, float], point2: Tuple[float, float]) -> Tuple[float, float]:
     """
     Compute the midpoint between two points.
     """
@@ -118,7 +120,7 @@ def get_midpoint(point1, point2):
     return midpoint_x, midpoint_y
 
 
-def add_extra_points(point1, point2):
+def add_extra_points(point1: Tuple[float, float], point2: Tuple[float, float]) -> List[Tuple[float, float]]:
     """
     Use interpolation to insert additional points between original way-points.
     """
@@ -141,7 +143,7 @@ def add_extra_points(point1, point2):
     return extra_points
 
 
-def create_spline(points):
+def create_spline(points: List[Tuple[float, float]]) -> Tuple[CubicSpline, CubicSpline]:
     """
     Build a cubic spline from a sequence of way-points.
 
@@ -160,7 +162,7 @@ def create_spline(points):
     return spline_x, spline_y
 
 
-def get_reference_path(route):
+def get_reference_path(route: dict) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]], Tuple[CubicSpline, CubicSpline]]:
     """
     Compute reference path.
 
@@ -198,7 +200,7 @@ def get_reference_path(route):
     return local_points, detailed_path, spline
 
 
-def get_speed_limits(route):
+def get_speed_limits(route: dict) -> List[List[Tuple[int, int], Tuple[int, int], float]]:
     """
     Get list of speed limits intervals along the reference path for detailed way-points (original + extra added).
 
@@ -241,7 +243,10 @@ def get_speed_limits(route):
     return detailed_speed_limits
 
 
-def get_path_and_speed_limits(route):
+def get_path_and_speed_limits(route: dict) -> Tuple[
+    Tuple[List[Tuple[float, float]], List[Tuple[float, float]], Tuple[CubicSpline, CubicSpline]],
+    List[List[Tuple[int, int], Tuple[int, int], float]]
+    ]:
     """
     Get the reference path (original and detailed points + spline) in one single function call.
     """

@@ -1,7 +1,7 @@
 # Safe-Autonomous-Driving-MPC
 
 **A Hierarchical Control Architecture for Safe Urban Autonomous Driving**
-
+[![Demo](animations/driving_simulation.gif)](https://www.youtube.com/watch?v=poDN6H2RIFY)
 ## Project Overview
 
 **Safe-Autonomous-Driving-MPC** is a Python-based simulation framework that implements a two-stage Model Predictive Control (MPC) architecture. The system is designed to navigate an autonomous vehicle through realistic urban environments by first generating an optimal reference trajectory offline, and then tracking it in real-time while strictly respecting speed limits, handling static and dynamic obstacles, and adhering to vehicle dynamic constraints.
